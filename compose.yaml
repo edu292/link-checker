@@ -1,0 +1,5 @@
+services:
+  link-checker:
+    build: .
+    env_file:
+      - .env
