@@ -208,6 +208,14 @@ async def check_link(page: Page, url: str) -> LinkResult:
 async def process_row(sem: asyncio.Semaphore, context, row, link):
     async with sem:
         page = await context.new_page()
+        await page.route(
+            '**/*',
+            lambda route: (
+                route.abort()
+                if route.request.resource_type in ['image', 'stylesheet', 'media', 'font']
+                else route.continue_()
+            ),
+        )
         res = await check_link(page, link)
         await page.close()
 
