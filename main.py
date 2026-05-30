@@ -112,45 +112,38 @@ def clean_text(text: str) -> str:
 
 
 async def get_text(page) -> str:
-    script = r"""
+    script = """
     (el) => {
-        return new Promise((resolve) => {
-            let attempts = 0;
-
-            function extractText() {
-                let text = '';
-                function walk(node) {
-                    if (node.nodeType === Node.ELEMENT_NODE) {
-                        const tag = node.tagName.toUpperCase();
-                        if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT') return;
-                    }
-                    if (node.nodeType === Node.TEXT_NODE) {
-                        text += node.nodeValue + ' ';
-                    }
-                    if (node.shadowRoot) {
-                        for (let child of node.shadowRoot.childNodes) walk(child);
-                    }
-                    for (let child of node.childNodes) walk(child);
-                }
-                walk(el);
-                return text.replace(/\s+/g, ' ').trim();
+        let text = '';
+        function walk(node) {
+            if (node.nodeType === Node.ELEMENT_NODE) {
+                const tag = node.tagName.toUpperCase();
+                if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT') return;
             }
-
-            const timer = setInterval(() => {
-                attempts++;
-                const txt = extractText();
-                if (txt.length > 20 || attempts >= 40) {
-                    clearInterval(timer);
-                    resolve(txt);
-                }
-            }, 500);
-        });
+            if (node.nodeType === Node.TEXT_NODE) {
+                text += node.nodeValue + ' ';
+            }
+            if (node.shadowRoot) {
+                for (let child of node.shadowRoot.childNodes) walk(child);
+            }
+            for (let child of node.childNodes) walk(child);
+        }
+        walk(el);
+        return text.replace(/\\s+/g, ' ').trim();
     }
     """
-    body = await page.locator('body').element_handle()
-    if not body:
-        return ''
-    return await body.evaluate(script)
+
+    body = page.locator('body')
+    for _ in range(40):
+        try:
+            txt = await body.evaluate(script)
+            if len(txt) > 20:
+                return txt
+        except Exception:
+            pass
+        await asyncio.sleep(0.5)
+
+    return ''
 
 
 async def check_link(page: Page, url: str) -> LinkResult:
