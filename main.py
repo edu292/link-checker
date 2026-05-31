@@ -11,17 +11,17 @@ from urllib.parse import urlparse
 
 import openpyxl
 from environs import Env
-from playwright.async_api import Page, async_playwright
+from playwright.async_api import Page, TimeoutError, async_playwright
 
 env = Env()
 env.read_env()
 
 RE_404 = re.compile(r'\b404\b')
 RE_SPACES = re.compile(r'\s+')
-RE_ERRO = re.compile(r'not found|nao encontrada|nao encontrado|erro|manutencao|offline')
-RE_BOT = re.compile(r'cloudflare|captcha|attention required|checking your browser|robot|sou humano|permission')
-RE_ESGOTADO = re.compile(r'esgotado|indisponivel|nao ha ingressos|encerrado')
-RE_ATIVO = re.compile(r'comprar|ingresso|selecionar assento|checkout|entrada')
+RE_ERRO = re.compile(r'\b(not found|nao encontrada|nao encontrado|erro|manutencao|offline)\b')
+RE_BOT = re.compile(r'\b(cloudflare|captcha|attention required|checking your browser|robot|sou humano|permission)\b')
+RE_ESGOTADO = re.compile(r'\b(esgotado|indisponivel|nao ha ingressos|encerrado)\b')
+RE_ATIVO = re.compile(r'\b(comprar|ingresso|selecionar assento|checkout|entrada)\b')
 
 
 @dataclass(frozen=True)
@@ -48,6 +48,7 @@ class Status(IntEnum):
     ERRO_SERVIDOR = auto()
     ERRO_CLIENTE = auto()
     ERRO_EXECUCAO = auto()
+    TIMEOUT = auto()
     BLOQUEADO_BOT = auto()
     PAGINA_EM_BRANCO = auto()
     PAGINA_MENSAGEM_ERRO = auto()
@@ -73,7 +74,7 @@ async def get_sheet_links() -> list[tuple[int, str]]:
         if not response.ok:
             raise RuntimeError(f'Fetch failed: {response.status}')
         body = await response.body()
-        wb = openpyxl.load_workbook(BytesIO(body), data_only=False)
+        wb = openpyxl.load_workbook(BytesIO(body), data_only=True)
 
     sheet = None
     if Config.SHEET_NAME:
@@ -157,7 +158,7 @@ async def get_text(page: Page) -> str:
 
 async def check_link(page: Page, url: str) -> LinkResult:
     try:
-        response = await page.goto(url, wait_until='networkidle', timeout=Config.PAGE_LOAD_TIMEOUT)
+        response = await page.goto(url, wait_until='domcontentloaded', timeout=Config.PAGE_LOAD_TIMEOUT)
 
         if not response:
             return LinkResult(url, Status.ERRO_REDE)
@@ -177,7 +178,14 @@ async def check_link(page: Page, url: str) -> LinkResult:
         texto_corpo = clean_text(raw_text)
 
         if not texto_corpo:
-            print(raw_text)
+            try:
+                await page.wait_for_load_state('networkidle', timeout=10000)
+            except TimeoutError:
+                return LinkResult(url, Status.TIMEOUT)
+            raw_text = await get_text(page)
+            texto_corpo = clean_text(raw_text)
+
+        if not texto_corpo:
             return LinkResult(url, Status.PAGINA_EM_BRANCO)
 
         if RE_ERRO.search(texto_corpo) or RE_404.search(texto_corpo):
@@ -190,6 +198,8 @@ async def check_link(page: Page, url: str) -> LinkResult:
             return LinkResult(url, Status.PAGINA_MENSAGEM_ESGOTADO)
 
         return LinkResult(url, Status.OK)
+    except TimeoutError:
+        return LinkResult(url, Status.TIMEOUT)
     except Exception as e:
         return LinkResult(url, Status.ERRO_EXECUCAO, str(e))
 
@@ -280,6 +290,17 @@ async def main():
                 '--disable-webgl',
                 '--disable-background-networking',
                 '--single-process',
+                '--disable-sync',
+                '--disable-translate',
+                '--no-first-run',
+                '--disable-default-apps',
+                '--metrics-recording-only',
+                '--safebrowsing-disable-auto-update',
+                '--disable-background-timer-throttling',
+                '--disable-backgrounding-occluded-windows',
+                '--disable-renderer-backgrounding',
+                '--disable-ipc-flooding-protection',
+                '--disable-features=Translate,OptimizationHints,MediaRouter,DialMediaRouteProvider',
             ],
         )
         context = await browser.new_context(
