@@ -1,6 +1,8 @@
 FROM mcr.microsoft.com/playwright/python:v1.60.0-noble-amd64
 COPY --from=ghcr.io/astral-sh/uv:alpine3.23 /usr/local/bin/uv /usr/local/bin/uvx /bin/
 
+LABEL org.opencontainers.image.source=https://github.com/edu292/link-checker
+
 WORKDIR /app
 
 ENV UV_COMPILE_BYTECODE=1 \

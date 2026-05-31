@@ -1,5 +1,5 @@
 services:
   link-checker:
-    image: ghcr.io/edu292/link-checker:latest
+    build: .
     env_file:
       - .env

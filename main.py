@@ -7,14 +7,21 @@ from datetime import datetime
 from email.message import EmailMessage
 from enum import IntEnum, auto
 from io import BytesIO
+from urllib.parse import urlparse
 
 import openpyxl
-import requests
 from environs import Env
 from playwright.async_api import Page, async_playwright
 
 env = Env()
 env.read_env()
+
+RE_404 = re.compile(r'\b404\b')
+RE_SPACES = re.compile(r'\s+')
+RE_ERRO = re.compile(r'not found|nao encontrada|nao encontrado|erro|manutencao|offline')
+RE_BOT = re.compile(r'cloudflare|captcha|attention required|checking your browser|robot|sou humano|permission')
+RE_ESGOTADO = re.compile(r'esgotado|indisponivel|nao ha ingressos|encerrado')
+RE_ATIVO = re.compile(r'comprar|ingresso|selecionar assento|checkout|entrada')
 
 
 @dataclass(frozen=True)
@@ -24,7 +31,9 @@ class Config:
     LINK_COLUMN_NAME = env.str('LINK_COLUMN_NAME')
     DATE_COLUMN_NAME = env.str('DATE_COLUMN_NAME', default='')
     PAGE_LOAD_TIMEOUT = env.int('PAGE_LOAD_TIMEOUT', default=30000)
+    MAX_CONCURRENT_PAGES = env.int('MAX_CONCURRENT_PAGES', default=2)
 
+    SEND_EMAIL = env.bool('SEND_EMAIL', default=True)
     SMTP_HOST = env.str('SMTP_HOST')
     SMTP_PORT = env.int('SMTP_PORT', default=587)
     SMTP_USER = env.str('SMTP_USER', default='')
@@ -55,13 +64,17 @@ class LinkResult:
         return f'{self.url} - {self.status.name}: {self.context}'
 
 
-def get_sheet_links() -> list[tuple[int, str]]:
+async def get_sheet_links() -> list[tuple[int, str]]:
     url = Config.SPREADSHEET_URL.split('/edit')[0] + '/export?format=xlsx'
 
-    res = requests.get(url)
-    res.raise_for_status()
+    async with async_playwright() as p:
+        request_context = await p.request.new_context()
+        response = await request_context.get(url)
+        if not response.ok:
+            raise RuntimeError(f'Fetch failed: {response.status}')
+        body = await response.body()
+        wb = openpyxl.load_workbook(BytesIO(body), data_only=False)
 
-    wb = openpyxl.load_workbook(BytesIO(res.content), data_only=False)
     sheet = None
     if Config.SHEET_NAME:
         try:
@@ -107,48 +120,44 @@ def get_sheet_links() -> list[tuple[int, str]]:
 
 def clean_text(text: str) -> str:
     text = unicodedata.normalize('NFKD', text).encode('ASCII', 'ignore').decode('utf-8')
-    text = re.sub(r'\s+', ' ', text)
+    text = RE_SPACES.sub(' ', text)
     return text.lower().strip()
 
 
-async def get_text(page) -> str:
+async def get_text(page: Page) -> str:
     script = """
-    (el) => {
-        let text = '';
-        function walk(node) {
-            if (node.nodeType === Node.ELEMENT_NODE) {
-                const tag = node.tagName.toUpperCase();
-                if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT') return;
-            }
-            if (node.nodeType === Node.TEXT_NODE) {
-                text += node.nodeValue + ' ';
-            }
-            if (node.shadowRoot) {
-                for (let child of node.shadowRoot.childNodes) walk(child);
-            }
-            for (let child of node.childNodes) walk(child);
+() => {
+    let text = [];
+    function walk(node) {
+        if (node.nodeType === Node.TEXT_NODE) {
+            const content = node.textContent.trim();
+            if (content) text.push(content);
+            return;
         }
-        walk(el);
-        return text.replace(/\\s+/g, ' ').trim();
+
+        if (node.nodeType === Node.ELEMENT_NODE) {
+            const tag = node.tagName;
+            if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT') return;
+            if (node.shadowRoot) walk(node.shadowRoot);
+        }
+
+        for (const child of node.childNodes) walk(child);
     }
-    """
 
-    body = page.locator('body')
-    for _ in range(40):
-        try:
-            txt = await body.evaluate(script)
-            if len(txt) > 20:
-                return txt
-        except Exception:
-            pass
-        await asyncio.sleep(0.5)
+    walk(document.body);
+    return text.join(' ');
+}
+"""
 
-    return ''
+    try:
+        return await page.evaluate(script)
+    except Exception:
+        return ''
 
 
 async def check_link(page: Page, url: str) -> LinkResult:
     try:
-        response = await page.goto(url, wait_until='domcontentloaded', timeout=Config.PAGE_LOAD_TIMEOUT)
+        response = await page.goto(url, wait_until='networkidle', timeout=Config.PAGE_LOAD_TIMEOUT)
 
         if not response:
             return LinkResult(url, Status.ERRO_REDE)
@@ -158,44 +167,36 @@ async def check_link(page: Page, url: str) -> LinkResult:
         if response.status >= 400:
             return LinkResult(url, Status.ERRO_CLIENTE)
 
+        titulo = clean_text(await page.title())
+        if RE_ERRO.search(titulo) or RE_404.search(titulo):
+            return LinkResult(url, Status.PAGINA_MENSAGEM_ERRO)
+        if RE_BOT.search(titulo):
+            return LinkResult(url, Status.BLOQUEADO_BOT)
+
         raw_text = await get_text(page)
         texto_corpo = clean_text(raw_text)
 
         if not texto_corpo:
+            print(raw_text)
             return LinkResult(url, Status.PAGINA_EM_BRANCO)
 
-        titulo = clean_text(await page.title())
-
-        palavras_erro = ['not found', 'nao encontrada', 'nao encontrado', 'erro', 'manutencao', 'offline']
-        has_error_word = any(k in titulo or k in texto_corpo for k in palavras_erro)
-        has_404 = re.search(r'\b404\b', titulo) or re.search(r'\b404\b', texto_corpo)
-
-        if has_error_word or has_404:
+        if RE_ERRO.search(texto_corpo) or RE_404.search(texto_corpo):
             return LinkResult(url, Status.PAGINA_MENSAGEM_ERRO)
 
-        palavras_bot = [
-            'cloudflare',
-            'captcha',
-            'attention required',
-            'checking your browser',
-            'robot',
-            'sou humano',
-            'permission',
-        ]
-        if any(k in titulo or k in texto_corpo for k in palavras_bot):
-            print(texto_corpo)
+        if RE_BOT.search(texto_corpo):
             return LinkResult(url, Status.BLOQUEADO_BOT)
 
-        palavras_esgotado = ['esgotado', 'indisponivel', 'nao ha ingressos', 'encerrado']
-        palavras_ativo = ['comprar', 'ingresso', 'selecionar assento', 'checkout', 'entrada']
-
-        if any(k in texto_corpo for k in palavras_esgotado) and not any(k in texto_corpo for k in palavras_ativo):
+        if RE_ESGOTADO.search(texto_corpo) and not RE_ATIVO.search(texto_corpo):
             return LinkResult(url, Status.PAGINA_MENSAGEM_ESGOTADO)
 
         return LinkResult(url, Status.OK)
-
     except Exception as e:
         return LinkResult(url, Status.ERRO_EXECUCAO, str(e))
+
+
+def get_root_domain(url):
+    netloc = urlparse(url).netloc.split(':')[0]
+    return next((p for p in reversed(netloc.split('.')) if len(p) > 3), netloc)
 
 
 async def process_row(sem: asyncio.Semaphore, context, row, link):
@@ -205,7 +206,11 @@ async def process_row(sem: asyncio.Semaphore, context, row, link):
             '**/*',
             lambda route: (
                 route.abort()
-                if route.request.resource_type in ['image', 'stylesheet', 'media', 'font']
+                if route.request.resource_type in ['image', 'stylesheet', 'media', 'font', 'other', 'manifest']
+                or (
+                    route.request.resource_type in ['script', 'fetch', 'xhr']
+                    and get_root_domain(route.request.url) != get_root_domain(link)
+                )
                 else route.continue_()
             ),
         )
@@ -250,15 +255,33 @@ def send_error_report(failures: list[tuple[int, LinkResult]], total_links: int):
 
 
 async def main():
-    links = get_sheet_links()
+    links = await get_sheet_links()
     total_links = len(links)
     if total_links == 0:
         return
 
-    sem = asyncio.Semaphore(10)
+    sem = asyncio.Semaphore(Config.MAX_CONCURRENT_PAGES)
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        browser = await p.chromium.launch(
+            headless=True,
+            args=[
+                '--disable-gpu',
+                '--disable-dev-shm-usage',
+                '--disable-extensions',
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-gl-drawing-for-tests',
+                '--disable-animations',
+                '--blink-settings=imagesEnabled=false',
+                '--mute-audio',
+                '--hide-scrollbars',
+                '--disable-site-isolation-trials',
+                '--disable-webgl',
+                '--disable-background-networking',
+                '--single-process',
+            ],
+        )
         context = await browser.new_context(
             user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
             extra_http_headers={'sec-ch-ua': '"Chromium";v="125", "Not.A/Brand";v="24"'},
@@ -271,7 +294,9 @@ async def main():
     failures = [r for r in results if r is not None]
 
     if failures:
-        send_error_report(failures, total_links)
+        print(f'Foram encontrados {len(failures)}/{total_links} links com erro')
+        if Config.SEND_EMAIL:
+            send_error_report(failures, total_links)
     else:
         print(f'Sucesso. {total_links} links checados. Zero falhas.')
 
