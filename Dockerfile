@@ -1,20 +1,25 @@
-FROM mcr.microsoft.com/playwright/python:v1.60.0-noble-amd64
-COPY --from=ghcr.io/astral-sh/uv:alpine3.23 /usr/local/bin/uv /usr/local/bin/uvx /bin/
+FROM docker.io/library/python:3.14.2-slim-trixie
 
-LABEL org.opencontainers.image.source=https://github.com/edu292/link-checker
+COPY --from=ghcr.io/astral-sh/uv:alpine3.23 /usr/local/bin/uv /bin/
 
 WORKDIR /app
 
-ENV UV_COMPILE_BYTECODE=1 \
+ENV UV_PYTHON_DOWNLOADS=never \
+    UV_PYTHON=/usr/local/bin/python \
     UV_LINK_MODE=copy \
-    UV_SYSTEM_PYTHON=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PTTHONUNBUFFERED=1
+
+RUN uv pip install playwright \
+    && playwright install --with-deps chromium \
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -rf /root/.cache/ms-playwright/firefox* \
+    && rm -rf /root/.cache/ms-playwright/webkit*
 
 COPY pyproject.toml uv.lock ./
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip compile pyproject.toml -o - | uv pip install -r -
 
-COPY main.py ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv export --no-dev --format requirements.txt | uv pip install -r -
+
+COPY src/ .
 
 CMD ["python", "main.py"]

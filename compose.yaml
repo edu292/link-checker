@@ -3,3 +3,8 @@ services:
     build: .
     env_file:
       - .env
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: '2G'
