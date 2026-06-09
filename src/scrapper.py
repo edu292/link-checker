@@ -55,7 +55,6 @@ async def scrappe_page(config: AppConfig, page: Page, task: ScrapeTask, checks: 
         error = _evaluate_checks(payload, checks)
         if error:
             check, match = error
-            await page.pause()
             res = LinkResult(task.url, Status.CONTENT_ERROR, reason=check.error, matched_word=match)
             if check.screenshot:
                 await page.wait_for_timeout(config.screenshot.delay)
@@ -79,7 +78,7 @@ async def scrappe_page(config: AppConfig, page: Page, task: ScrapeTask, checks: 
 async def process_task(sem: Semaphore, config: AppConfig, context: BrowserContext, task: ScrapeTask, static_checks):
     async with sem:
         page = await context.new_page()
-        res = await scrappe_page(config=config, page=page, task=task, checks=chain(task.checks, static_checks))
+        res = await scrappe_page(config=config, page=page, task=task, checks=chain(static_checks, task.checks))
 
         await page.close()
         if res.status != Status.OK:

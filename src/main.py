@@ -103,8 +103,9 @@ async def main(config: AppConfig):
     sem = asyncio.Semaphore(config.browser.max_concurrent_pages)
     async with async_playwright() as p:
         browser = await p.chromium.launch(
-            headless=False,
+            headless=True,
             args=[
+                '--headless=new',
                 '--disable-gpu',
                 '--disable-dev-shm-usage',
                 '--disable-extensions',

@@ -128,11 +128,14 @@ def get_scrapper_tasks(
 
                 case MatchColumnCheck():
                     target = row_data[check.column]
+                    if target is None:
+                        continue
+
                     if not isinstance(target, datetime):
                         target = clean_text(str(target))
                     compiled.append(
                         CompiledCheck(
-                            error=check.error,
+                            error=f'{check.error} (Expected: {target})',
                             targets=[target],  # pyright: ignore[reportArgumentType]
                             assertion=Assertion.REQUIRED,
                             screenshot=check.screenshot,
