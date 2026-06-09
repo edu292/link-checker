@@ -1,17 +1,14 @@
-import warnings
 from enum import StrEnum, nonmember
+from pathlib import Path
+from typing import Literal
 
 import msgspec
 
-from utils import OperatorType, clean_text
+from shared import Assertion, Operator
+from utils import clean_text
 
 
-class RuleType(StrEnum):
-    REQUIRED = 'required'
-    FORBIDDEN = 'forbidden'
-
-
-class MatchMode(StrEnum):
+class Require(StrEnum):
     ANY = 'any'
     ALL = 'all'
 
@@ -24,34 +21,33 @@ class FilterType(StrEnum):
     tag_field = nonmember('type')
 
 
-class RuleKind(StrEnum):
+class CheckMatch(StrEnum):
     COLUMN = 'column'
-    STATIC = 'static'
-    CONDITIONAL = 'conditional'
+    TEXT = 'text'
 
-    tag_field = nonmember('kind')
+    tag_field = nonmember('match_by')
 
 
-class SettingsConfig(msgspec.Struct):
+class BrowserConfig(msgspec.Struct):
     max_concurrent_pages: int = 2
+    block_media: bool = True
+    block_third_party: bool = False
     page_load_timeout: int = 15000
     network_idle_timeout: int = 5000
-    ui_settle_delay: int = 1500
-    send_email: bool = True
-    take_screenshots: bool | None = None
 
-    def __post_init__(self):
-        if not self.send_email:
-            if self.take_screenshots is True:
-                warnings.warn('SETTINGS: take_screenshots has no effect if send_email is set to false.', stacklevel=2)
-            self.take_screenshots = False
-        elif self.take_screenshots is None:
-            self.take_screenshots = True
+
+class ScreenshotConfig(msgspec.Struct):
+    enabled: bool = True
+    delay: int = 1500
+    full_page: bool = False
+    quality: int = 50
+    format: Literal['jpeg', 'png'] = 'jpeg'
 
 
 class SmtpConfig(msgspec.Struct):
     host: str
     to_addresses: list[str]
+    enabled: bool = True
     port: int = 587
     user: str = ''
     password: str = ''
@@ -76,7 +72,7 @@ class SpreadsheetConfig(msgspec.Struct):
 
 class FilterBase(msgspec.Struct, tag_field=FilterType.tag_field):
     column: str
-    operator: OperatorType
+    operator: Operator
 
     def __post_init__(self):
         self.column = clean_text(self.column)
@@ -97,66 +93,68 @@ class DateFilter(FilterBase, tag=FilterType.DATE.value):
 FilterConfig = NumberFilter | TextFilter | DateFilter
 
 
-class RuleBase(msgspec.Struct, kw_only=True, tag_field=RuleKind.tag_field):
-    name: str
-    screenshot: bool = False
+class Check(msgspec.Struct, kw_only=True, tag_field=CheckMatch.tag_field):
+    error: str
+    screenshot: bool = True
 
 
-class StaticRule(RuleBase, tag=RuleKind.STATIC.value):
-    words: list[str]
-    type: RuleType = RuleType.FORBIDDEN
+class MatchTextCheck(Check, tag=CheckMatch.TEXT.value):
+    text: str | list[str]
+    assertion: Assertion | None = None
+    if_column: str | None = None
+    if_value: str | int | float | None = None
+    if_require: Require | None = None
+    if_operator: Operator | None = None
 
     def __post_init__(self):
-        self.words = [clean_text(word) for word in self.words]
+        raw_text = [self.text] if isinstance(self.text, str) else self.text
+        self.text = [clean_text(t) for t in raw_text]
+
+        if not self.if_column:
+            if any(x is not None for x in (self.if_value, self.if_require, self.if_operator)):
+                raise ValueError(f"CHECK '{self.error}': if_value, if_require, if_operation require if_column.")
+            self.assertion = self.assertion or Assertion.FORBIDDEN
+            return
+
+        self.if_column = clean_text(self.if_column)
+
+        if self.if_value is None:
+            raise ValueError(f"CHECK '{self.error}': if_column requires if_value.")
+
+        self.assertion = self.assertion or Assertion.REQUIRED
+        self.if_operator = self.if_operator or Operator.EQ
+
+        if isinstance(self.if_value, str):
+            self.if_value = clean_text(self.if_value)
+
+        if self.if_require is None:
+            self.if_require = Require.ANY
+
+    @property
+    def is_conditional(self):
+        return self.if_column is not None
 
 
-class ColumnRule(RuleBase, tag=RuleKind.COLUMN.value):
+class MatchColumnCheck(Check, tag=CheckMatch.COLUMN.value):
     column: str
+    assertion: Assertion = Assertion.REQUIRED
 
     def __post_init__(self):
         self.column = clean_text(self.column)
 
 
-class ConditionalRule(RuleBase, tag=RuleKind.CONDITIONAL.value):
-    target_column: str
-    test_value: str | int | float | list[str | int | float]
-    words: list[str]
-    type: RuleType = RuleType.REQUIRED
-    operator: OperatorType = OperatorType.EQ
-    match_mode: MatchMode | None = None
-
-    def __post_init__(self):
-        self.target_column = clean_text(self.target_column)
-        self.words = [clean_text(word) for word in self.words]
-
-        if isinstance(self.test_value, list):
-            self.test_value = [clean_text(v) if isinstance(v, str) else v for v in self.test_value]
-            if self.match_mode is None:
-                self.match_mode = MatchMode.ANY
-        else:
-            if isinstance(self.test_value, str):
-                self.test_value = clean_text(self.test_value)
-
-            if self.match_mode is not None:
-                warnings.warn(
-                    f"RULE '{self.name}': match_mode '{self.match_mode}' ignored. test_values is single item.",
-                    stacklevel=2,
-                )
-
-            self.match_mode = MatchMode.ANY
-
-
-RuleConfig = StaticRule | ColumnRule | ConditionalRule
+CheckConfig = MatchTextCheck | MatchColumnCheck
 
 
 class AppConfig(msgspec.Struct):
     spreadsheet: SpreadsheetConfig
-    settings: SettingsConfig
+    screenshot: ScreenshotConfig
+    browser: BrowserConfig
     smtp: SmtpConfig
     filters: list[FilterConfig] = []
-    rules: list[RuleConfig] = []
+    checks: list[CheckConfig] = []
 
 
-def load_config(path: str) -> AppConfig:
+def load_config(path: str | Path) -> AppConfig:
     with open(path, 'rb') as f:
         return msgspec.toml.decode(f.read(), type=AppConfig)

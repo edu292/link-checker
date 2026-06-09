@@ -1,40 +1,22 @@
 import asyncio
 import smtplib
-from dataclasses import dataclass
 from email.message import EmailMessage
 from enum import IntEnum, auto
-from urllib.parse import urlparse
+from pathlib import Path
 
-from playwright.async_api import BrowserContext, Page, TimeoutError, async_playwright
+from playwright.async_api import Route, async_playwright
 
-from utils import clean_text
+from config import AppConfig, MatchColumnCheck, MatchTextCheck, load_config
+from parser import get_scrapper_tasks
+from scrapper import get_response_body, process_task
+from shared import CompiledCheck, LinkResult
+from utils import get_root_domain
 
-
-class Status(IntEnum):
-    OK = auto()
-    ERRO_REDE = auto()
-    ERRO_SERVIDOR = auto()
-    PAGINA_NAO_ENCONTRADA = auto()
-    ERRO_CLIENTE = auto()
-    ERRO_EXECUCAO = auto()
-    TIMEOUT = auto()
-    PAGINA_EM_BRANCO = auto()
-
-
-@dataclass(slots=True)
-class LinkResult:
-    url: str
-    status: Status
-    reason: str = ''
-    screenshot: bytes | None = None
-
-    def __str__(self) -> str:
-        return f'{self.url} - {self.status.name}\n {self.reason}'
-
+BASE_DIR = Path(__file__).parent
 
 BLOCKED_RESOURCE_TYPES = {
     'image',
-    'stylesheet',
+    'texttrack',
     'media',
     'font',
     'other',
@@ -44,145 +26,85 @@ BLOCKED_RESOURCE_TYPES = {
     'ping',
     'csp_report',
 }
-SAME_ORIGIN_ONLY_RESOURCE_TYPES = {
-    'script',
-    'fetch',
-    'xhr',
-}
-EXTRACT_TEXT_JS = (BASE_DIR / 'extract_text.js').read_text()
+
+SAME_ORIGIN_RESOURCE_TYPES = {'script', 'xhr', 'fetch'}
 
 
-async def get_text(page: Page) -> str:
-    try:
-        return await page.evaluate('window.extractText()')
-    except Exception:
-        return ''
+class Status(IntEnum):
+    OK = auto()
+    NETWORK_ERROR = auto()
+    NOT_FOUND = auto()
+    CLIENT_ERROR = auto()
+    RUNTIME_ERROR = auto()
+    TIMEOUT = auto()
+    EMPTY_RESPONSE = auto()
 
 
-def apply_rules(text: str, rules: list) -> str | None:
-    for rule in rules:
-        found = bool(rule.pattern.search(text))
-
-        if rule.type == RuleType.FORBIDDEN and found:
-            return rule.name
-        if rule.type == RuleType.REQUIRED and not found:
-            return rule.name
-
-    return None
-
-
-async def check_link(page: Page, url: str) -> LinkResult:
-    try:
-        response = await page.goto(url, wait_until='domcontentloaded', timeout=config.settings.page_load_timeout)
-
-        if not response:
-            return LinkResult(url, Status.ERRO_REDE)
-
-        if response.status >= 500:
-            return LinkResult(url, Status.ERRO_SERVIDOR)
-        if response.status == 404:
-            return LinkResult(url, Status.PAGINA_NAO_ENCONTRADA)
-        if response.status >= 400:
-            return LinkResult(url, Status.ERRO_CLIENTE)
-
-        titulo = clean_text(await page.title())
-        match = apply_rules(titulo)
-        if match:
-            return LinkResult(url, match)
-
-        raw_text = await get_text(page)
-        texto_corpo = clean_text(raw_text)
-
-        if not texto_corpo:
-            try:
-                await page.wait_for_load_state('networkidle', timeout=config.settings.network_idle_timeout)
-            except TimeoutError:
-                return LinkResult(url, Status.TIMEOUT)
-            raw_text = await get_text(page)
-            texto_corpo = clean_text(raw_text)
-
-        if not texto_corpo:
-            return LinkResult(url, Status.PAGINA_EM_BRANCO)
-
-        match = apply_rules(texto_corpo)
-        if match:
-            return LinkResult(url)
-
-        return LinkResult(url, Status.OK)
-    except TimeoutError:
-        return LinkResult(url, Status.TIMEOUT)
-    except Exception as e:
-        return LinkResult(url, Status.ERRO_EXECUCAO, str(e))
-
-
-def get_root_domain(url):
-    netloc = urlparse(url).netloc.split(':')[0]
-    return next((p for p in reversed(netloc.split('.')) if len(p) > 3), netloc)
-
-
-async def process_row(sem: asyncio.Semaphore, context: BrowserContext, row, link):
-    async with sem:
-        page = await context.new_page()
-        res = await check_link(page, link)
-        if Config.TAKE_SCREENSHOTS and res.status in SCREENSHOT_STATUSES:
-            try:
-                await page.wait_for_timeout(Config.UI_SETTLE_DELAY)
-                await page.evaluate("document.querySelectorAll('svg').forEach(e => e.remove());")
-                img = await page.screenshot(type='jpeg', quality=50, full_page=True)
-                res.screenshot = img
-            except Exception:
-                pass
-
-        await page.close()
-        if res.status != Status.OK:
-            print(row, res)
-            return (row, res)
-        return None
-
-
-def send_error_report(failures: list[tuple[int, LinkResult]], total_links: int):
-    if not Config.SMTP_HOST or not Config.EMAIL_TO:
-        print('SMTP config missing')
-        return
+def send_error_report(config: AppConfig, failures: list[tuple[int, LinkResult]], total_links: int):
+    if not config.smtp.host or not config.smtp.to_addresses:
+        raise RuntimeError('Missing required smtp settings: host, to_addresses')
 
     fail_count = len(failures)
-
     msg = EmailMessage()
     msg['Subject'] = f'[{fail_count}/{total_links} Falhas] Monitoramento de Links'
-    email_from = Config.EMAIL_FROM if Config.EMAIL_FROM else Config.SMTP_USER
+    email_from = config.smtp.from_address if config.smtp.from_address else config.smtp.user
     msg['From'] = email_from
-    msg['To'] = Config.EMAIL_TO
+    msg['To'] = config.smtp.to_addresses
     body = ''
     for row, res in failures:
         body += f'\n[Linha {row:03d}] {res.status.name}'
         body += f'\nURL:    {res.url}'
+        if res.http_code:
+            body += f'\nHTTP:   {res.http_code}'
         if res.reason:
-            body += f'\nMotivo: {res.reason}\n'
+            body += f'\nReason: {res.reason}'
+        if res.matched_word:
+            body += f'\nMatch:  "{res.matched_word}"'
+        body += '\n'
 
     msg.set_content(body)
     for row, res in failures:
         if res.screenshot:
             msg.add_attachment(
-                res.screenshot, maintype='image', subtype='jpeg', filename=f'{res.status.name}_{row}.jpeg'
+                res.screenshot,
+                maintype='image',
+                subtype=config.screenshot.format,
+                filename=f'{res.reason if res.reason else res.status.name}_{row}.{config.screenshot.format}',
             )
 
-    try:
-        with smtplib.SMTP(Config.SMTP_HOST, Config.SMTP_PORT) as server:
-            server.starttls()
-            server.login(Config.SMTP_USER, Config.SMTP_PASSWORD)
-            server.send_message(msg)
-        print('Email enviado.')
-    except Exception as e:
-        print(f'Erro SMTP: {e!s}')
+    with smtplib.SMTP(config.smtp.host, config.smtp.port) as server:
+        server.starttls()
+        server.login(config.smtp.user, config.smtp.password)
+        server.send_message(msg)
+    print('email sent')
 
 
-async def main():
-    sem = asyncio.Semaphore(Config.MAX_CONCURRENT_PAGES)
+async def _handle_route(route: Route):
+    request = route.request
+    resource_type = request.resource_type
+    url = request.url
+
+    if resource_type in BLOCKED_RESOURCE_TYPES:
+        await route.abort()
+        return
+
+    if resource_type == 'stylesheet':
+        await route.fulfill(status=200, content_type='text/css', body='')
+        return
+
+    if resource_type in SAME_ORIGIN_RESOURCE_TYPES and get_root_domain(url) != get_root_domain(request.frame.url):
+        await route.fulfill(status=200, content_type='application/javascript', body='')
+        return
+
+    await route.continue_()
+
+
+async def main(config: AppConfig):
+    sem = asyncio.Semaphore(config.browser.max_concurrent_pages)
     async with async_playwright() as p:
         browser = await p.chromium.launch(
-            headless=True,
+            headless=False,
             args=[
-                '--headless=new',
                 '--disable-gpu',
                 '--disable-dev-shm-usage',
                 '--disable-extensions',
@@ -190,7 +112,6 @@ async def main():
                 '--disable-setuid-sandbox',
                 '--disable-gl-drawing-for-tests',
                 '--disable-animations',
-                '--blink-settings=imagesEnabled=false',
                 '--mute-audio',
                 '--hide-scrollbars',
                 '--disable-site-isolation-trials',
@@ -217,39 +138,61 @@ async def main():
             user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
             extra_http_headers={'sec-ch-ua': '"Chromium";v="125", "Not.A/Brand";v="24"'},
         )
-        links = await get_sheet_data(context.request)
-        total_links = len(links)
-        if total_links == 0:
-            print('Nenhum link foi encontrado')
-            return
-
-        await context.add_init_script(EXTRACT_TEXT_JS)
+        await context.add_init_script(path=BASE_DIR / 'extract_text.js')
         await context.route(
             '**/*',
-            lambda route: (
-                route.abort()
-                if route.request.resource_type in BLOCKED_RESOURCE_TYPES
-                or (
-                    route.request.resource_type in SAME_ORIGIN_ONLY_RESOURCE_TYPES
-                    and get_root_domain(route.request.url) != get_root_domain(route.request.frame.url)
-                )
-                else route.continue_()
-            ),
+            _handle_route,
         )
 
-        tasks = [process_row(sem, context, row, url) for row, url in links]
-        results = await asyncio.gather(*tasks)
+        spreadsheet_bytes = await get_response_body(context.request, config.spreadsheet.url)
+        static_checks = []
+        checks_to_compile = []
+        for check in config.checks:
+            match check:
+                case MatchColumnCheck():
+                    checks_to_compile.append(check)
+                case MatchTextCheck():
+                    if check.is_conditional:
+                        checks_to_compile.append(check)
+                    else:
+                        static_checks.append(
+                            CompiledCheck(
+                                error=check.error,
+                                targets=check.text,  # pyright: ignore[reportArgumentType]
+                                assertion=check.assertion,  # pyright: ignore[reportArgumentType]
+                                screenshot=check.screenshot,
+                            )
+                        )
 
-        await browser.close()
+        tasks = get_scrapper_tasks(
+            bytes=spreadsheet_bytes,
+            sheetname=config.spreadsheet.sheet,
+            link_column=config.spreadsheet.link_column,
+            filters=config.filters,
+            checks_to_compile=checks_to_compile,
+        )
+
+        total_tasks = len(tasks)
+        if total_tasks == 0:
+            print('no links found')
+            return
+
+        tasks = [
+            process_task(sem=sem, config=config, context=context, task=task, static_checks=static_checks)
+            for task in tasks
+        ]
+
+        results = await asyncio.gather(*tasks)
     failures = [r for r in results if r is not None]
 
     if failures:
-        print(f'Foram encontrados {len(failures)}/{total_links} links com erro')
-        if config.settings.send_email:
-            send_error_report(failures, total_links)
+        print(f'{len(failures)}/{total_tasks} encountered')
+        if config.smtp.enabled:
+            send_error_report(config, failures, total_tasks)
     else:
-        print(f'Sucesso. {total_links} links checados. Zero falhas.')
+        print(f'{total_tasks} links scrapped. No erros')
 
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    config = load_config(BASE_DIR / 'config.toml')
+    asyncio.run(main(config))
