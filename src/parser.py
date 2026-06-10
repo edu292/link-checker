@@ -1,3 +1,4 @@
+from collections import defaultdict, deque
 from datetime import date, datetime, time
 from io import BytesIO
 from typing import Any
@@ -14,7 +15,7 @@ from config import (
     TextFilter,
 )
 from shared import OPERATOR_MAP, Assertion, CompiledCheck, ScrapeTask
-from utils import clean_text
+from utils import clean_text, get_root_domain
 
 
 def _evaluate_filter(raw_cell_value: Any, filter: FilterConfig) -> bool:
@@ -57,6 +58,23 @@ def _evaluate_filter(raw_cell_value: Any, filter: FilterConfig) -> bool:
     except (ValueError, TypeError) as e:
         print(e)
         return False
+
+
+def _distribute_by_domain(tasks: list[ScrapeTask]) -> list[ScrapeTask]:
+    tasks_by_domain = defaultdict(deque)
+    for task in tasks:
+        domain = get_root_domain(task.url)
+        tasks_by_domain[domain].append(task)
+
+    result = []
+    while tasks_by_domain:
+        for domain in list(tasks_by_domain.keys()):
+            if domain_tasks := tasks_by_domain[domain]:
+                result.append(domain_tasks.popleft())
+            else:
+                del tasks_by_domain[domain]
+
+    return result
 
 
 def get_scrapper_tasks(
@@ -143,4 +161,4 @@ def get_scrapper_tasks(
                     )
         tasks.append(ScrapeTask(row=row, url=hyperlink.target, checks=compiled))
 
-    return tasks
+    return _distribute_by_domain(tasks)

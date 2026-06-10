@@ -1,8 +1,8 @@
 services:
   link-checker:
     build: .
-    env_file:
-      - .env
+    volumes:
+      - "./config.toml:/app/config.toml"
     deploy:
       resources:
         limits:

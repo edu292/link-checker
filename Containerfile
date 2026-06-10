@@ -7,7 +7,7 @@ WORKDIR /app
 ENV UV_PYTHON_DOWNLOADS=never \
     UV_PYTHON=/usr/local/bin/python \
     UV_LINK_MODE=copy \
-    PTTHONUNBUFFERED=1
+    PTTHONUNBUFERED=1
 
 RUN uv pip install playwright \
     && playwright install --with-deps chromium \
