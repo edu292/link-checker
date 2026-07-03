@@ -18,31 +18,32 @@ def get_root_domain(url: str) -> str:
 
 
 def build_datetime_regexes(dt: datetime) -> list[str]:
-    months_pt = {
-        1: ('janeiro', 'jan'),
-        2: ('fevereiro', 'fev'),
-        3: ('marco', 'mar'),
-        4: ('abril', 'abr'),
-        5: ('maio', 'mai'),
-        6: ('junho', 'jun'),
-        7: ('julho', 'jul'),
-        8: ('agosto', 'ago'),
-        9: ('setembro', 'set'),
-        10: ('outubro', 'out'),
-        11: ('novembro', 'nov'),
-        12: ('dezembro', 'dez'),
-    }
+    months = [
+        'janeiro',
+        'fevereiro',
+        'marco',
+        'abril',
+        'maio',
+        'junho',
+        'julho',
+        'agosto',
+        'setembro',
+        'outubro',
+        'novembro',
+        'dezembro',
+    ]
 
-    d = rf'0?{dt.day}'
-    m_num = rf'0?{dt.month}'
-    m_long, m_short = months_pt[dt.month]
-    m_text = rf'(?:{m_long}|{m_short})'
+    day = rf'0?{dt.day}'
+    month_num = rf'0?{dt.month}'
 
-    y = rf'(?:\s+(?:de\s+)?(?:{dt.year}|{dt.year % 100:02d}))'
+    month_long = months[dt.month - 1]
+    month_abreviation = month_long[:3]
+    month_name = rf'(?:{month_long}|{month_abreviation})'
 
-    p1 = rf'{d}\s+de\s+{m_text}{y}?'
-    p2 = rf'{d}\D+{m_num}{y}?'
+    y = rf'(?:\s+(?:de\s+)?(?:{dt.year}|{dt.year % 100:02d}))?'
 
-    p3 = rf'{d}\s+{m_text}{y}?'
+    p1 = rf'{day}\s+de\s+{month_name}{y}'
+    p2 = rf'{day}\D+{month_num}{y}'
+    p3 = rf'{day}\s+{month_name}{y}'
 
     return [p1, p2, p3]

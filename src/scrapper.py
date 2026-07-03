@@ -50,25 +50,27 @@ async def scrappe_page(config: AppConfig, page: Page, task: ScrapeTask, checks: 
 
         if not body:
             return LinkResult(task.url, Status.EMPTY_RESPONSE)
+
         title = await page.title()
         payload = clean_text(title) + body
         error = _evaluate_checks(payload, checks)
-        if error:
-            check, match = error
-            res = LinkResult(task.url, Status.CONTENT_ERROR, reason=check.error, matched_word=match)
-            if check.screenshot:
-                await page.wait_for_timeout(config.screenshot.delay)
-                await page.evaluate("document.querySelectorAll('svg').forEach(e => e.remove());")
-                img = await page.screenshot(
-                    type=config.screenshot.format,
-                    quality=config.screenshot.quality,
-                    full_page=config.screenshot.full_page,
-                )
-                res.screenshot = img
+        if not error:
+            return LinkResult(task.url, Status.OK)
 
-            return res
+        check, match = error
+        res = LinkResult(task.url, Status.CONTENT_ERROR, reason=check.error, matched_word=match)
+        if check.screenshot:
+            await page.wait_for_timeout(config.screenshot.delay)
+            await page.evaluate("document.querySelectorAll('svg').forEach(e => e.remove());")
+            img = await page.screenshot(
+                type=config.screenshot.format,
+                quality=config.screenshot.quality,
+                full_page=config.screenshot.full_page,
+            )
+            res.screenshot = img
 
-        return LinkResult(task.url, Status.OK)
+        return res
+
     except TimeoutError:
         return LinkResult(task.url, Status.TIMEOUT)
     except Exception as e:

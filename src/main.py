@@ -52,7 +52,7 @@ def send_error_report(config: AppConfig, failures: list[tuple[int, LinkResult]],
     msg['To'] = config.smtp.to_addresses
     body = ''
     for row, res in failures:
-        body += f'\n[Linha {row:03d}] {res.status.name}'
+        body += f'\n[Row {row:03d}] {res.status.name}'
         body += f'\nURL:    {res.url}'
         if res.http_code:
             body += f'\nHTTP:   {res.http_code}'
@@ -187,7 +187,7 @@ async def main(config: AppConfig):
     failures = [r for r in results if r is not None]
 
     if failures:
-        print(f'{len(failures)}/{total_tasks} encountered')
+        print(f'{len(failures)}/{total_tasks} errors encountered')
         if config.smtp.enabled:
             send_error_report(config, failures, total_tasks)
     else:
