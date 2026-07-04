@@ -7,18 +7,18 @@ WORKDIR /app
 ENV UV_PYTHON_DOWNLOADS=never \
     UV_PYTHON=/usr/local/bin/python \
     UV_LINK_MODE=copy \
-    PTTHONUNBUFERED=1
-
-RUN uv pip install playwright \
-    && playwright install --with-deps chromium \
-    && rm -rf /var/lib/apt/lists/* \
-    && rm -rf /root/.cache/ms-playwright/firefox* \
-    && rm -rf /root/.cache/ms-playwright/webkit*
+    PYTHONUNBUFFERED=1 \
+    PLAYWRIGHT_BROWSERS_PATH=/usr/local/share/playwright
 
 COPY pyproject.toml uv.lock ./
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv export --no-dev --format requirements.txt | uv pip install -r -
+
+RUN playwright install --with-deps chromium \
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -rf /root/.cache/ms-playwright/firefox* \
+    && rm -rf /root/.cache/ms-playwright/webkit*
 
 COPY src/ .
 
