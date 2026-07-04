@@ -1,10 +1,7 @@
 services:
   link-checker:
-    build: .
+    build:
+      context: .
+      dockerfile: ./Containerfile
     volumes:
       - "./config.toml:/app/config.toml"
-    deploy:
-      resources:
-        limits:
-          cpus: '1.0'
-          memory: '2G'
